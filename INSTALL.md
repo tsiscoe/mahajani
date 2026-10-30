@@ -1,6 +1,6 @@
 # Installing & Configuring Mahajani
 
-This guide covers building **Mahajani** from source, running the 10-gate cryptographic verification suite, configuring the `./authorized_keys` and `./ftp_data` directories, setting up the companion Python keyserver/encryption tools, and troubleshooting common issues.
+This guide covers building **Mahajani** from source, running the 13-gate cryptographic verification suite, configuring the `./authorized_keys` and `./ftp_data` directories, setting up the companion Python keyserver/encryption tools, and troubleshooting common issues.
 
 ---
 
@@ -45,7 +45,7 @@ cargo install --path .
 
 ---
 
-## 3. Running the 10-Gate Verification Suite
+## 3. Running the 13-Gate Verification Suite
 
 Before deploying or exposing the server, execute the built-in end-to-end TCP verification harness (`--test` or `-t`):
 
@@ -53,7 +53,7 @@ Before deploying or exposing the server, execute the built-in end-to-end TCP ver
 cargo run --release -- --test
 ```
 
-This spawns an ephemeral test instance on `127.0.0.1:22123`, generates valid (`alice`) and forged (`mallory`) 1024-bit RSA keypairs, and verifies all 10 runtime and security gates (banner, unauthenticated command blocking, forged signature rejection, valid challenge-response login, `PASV`/`STOR`/`RETR` binary transfer integrity, `CWD`/`STOR`/`DELE` path traversal blocking, and `SITE REGISTER` overwrite/traversal protection).
+This spawns an ephemeral test instance on `127.0.0.1:22123`, generates valid (`alice`) and forged (`mallory`) 1024-bit RSA keypairs, and verifies all 13 runtime and Red-Dawn security gates (banner, unauthenticated command blocking, forged signature rejection, valid challenge-response login, `PASV`/`STOR`/`RETR` binary transfer integrity, `CWD`/`STOR`/`DELE` path traversal blocking, `SITE REGISTER` atomic overwrite/traversal protection, `SEC-06` disconnect challenge eviction, `SEC-08` `SITE DATATOKEN` hijack rejection, and `SEC-10`/`SEC-11` Windows device/alias rejection).
 
 ---
 

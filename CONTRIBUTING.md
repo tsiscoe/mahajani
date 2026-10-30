@@ -29,7 +29,7 @@ cargo fmt --check
 # 2. Build release binary and verify zero compilation warnings
 cargo check --all-targets
 
-# 3. Execute the 10-Gate Runtime & Security Hardening Self-Test Suite
+# 3. Execute the 13-Gate Runtime & Security Hardening Self-Test Suite
 cargo run --release -- --test
 
 # 4. Run Clippy static analysis
@@ -38,14 +38,14 @@ cargo clippy --all-targets
 
 ---
 
-## 3. Priority Security Hardening Backlog (`RED_DAWN_INDEPENDENT_AUDIT.md`)
+## 3. Red-Dawn Security Hardening Invariants (`RED_DAWN_INDEPENDENT_AUDIT.md`)
 
-Contributors looking to harden Mahajani further should consult [**RED_DAWN_INDEPENDENT_AUDIT.md**](RED_DAWN_INDEPENDENT_AUDIT.md), which specifies actionable remediation blueprints for six advanced vectors:
-- **`SEC-06`:** Implement `AuthManager::clear_challenge()` inside `Drop for FtpSession` and add TTL/capacity bounds on `active_challenges`.
-- **`SEC-07`:** Convert passive data listener `accept()` (`accept_data_connection`) to non-blocking polling with a 30-second `Instant` deadline and data-stream read/write timeouts.
-- **`SEC-08`:** Bind passive data connections to the authenticated control peer IP and optional per-transfer token.
+All pull requests must preserve the six remediated Red-Dawn security invariants documented in [**RED_DAWN_INDEPENDENT_AUDIT.md**](RED_DAWN_INDEPENDENT_AUDIT.md):
+- **`SEC-06`:** Preserve `AuthManager::clear_challenge()` inside `Drop for FtpSession` and the 60-second TTL / 128-entry capacity bounds on `active_challenges`.
+- **`SEC-07`:** Keep passive data listener `accept()` (`accept_data_connection`) non-blocking with a 10-second `Instant` deadline and 30-second data-stream read/write timeouts.
+- **`SEC-08`:** Preserve passive data connection control-peer IP verification and `SITE DATATOKEN <token>` preamble enforcement.
 - **`SEC-09`:** Hold a single registry lock across `SITE REGISTER` existence checks and file creation using `OpenOptions::new().write(true).create_new(true)`.
-- **`SEC-10` & `SEC-11`:** Make `canonicalize()` strictly fail-closed and add Windows reserved device name / trailing dot-space / reparse-point regression tests.
+- **`SEC-10` & `SEC-11`:** Keep `canonicalize()` strictly fail-closed alongside `symlink_metadata()` checks and Windows reserved device name / trailing dot-space / `~` 8.3 alias rejection.
 
 ---
 

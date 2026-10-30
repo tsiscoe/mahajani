@@ -41,7 +41,7 @@ flowchart TD
     VFS <-->|"Monitors mtime / atime / size"| Audit["tools/surveillance_worker.py\nOut-of-Band Honeypot & FileSystem Daemon"]
 ```
 
-For a comprehensive breakdown of the cryptographic challenge-response state machine, packet formats, path canonicalization invariants, and the 10-gate verification harness, see [**ARCHITECTURE.md**](ARCHITECTURE.md).
+For a comprehensive breakdown of the cryptographic challenge-response state machine, packet formats, path canonicalization invariants, and the 13-gate verification harness, see [**ARCHITECTURE.md**](ARCHITECTURE.md).
 
 ---
 
@@ -57,7 +57,7 @@ For a comprehensive breakdown of the cryptographic challenge-response state mach
 git clone https://github.com/tsiscoe/mahajani.git
 cd mahajani
 
-# 1. Execute the 10-Gate Cryptographic & Security Hardening Self-Test Suite
+# 1. Execute the 13-Gate Cryptographic & Security Hardening Self-Test Suite
 cargo run --release -- --test
 
 # 2. Launch the Mahajani OpenPGP FTP Server on 127.0.0.1:2121
@@ -70,33 +70,34 @@ See [**INSTALL.md**](INSTALL.md) for full installation, keyserver tooling setup,
 
 ## 4. FTP Control Protocol & Cryptographic Commands
 
-Mahajani implements RFC 959 control semantics augmented with public-key challenge-response authentication and in-band key enrollment:
+Mahajani implements RFC 959 control semantics augmented with public-key challenge-response authentication, per-transfer passive data-channel token binding, and in-band key enrollment:
 
 | Command | Auth Required? | Syntax | Server Response & Operational Behavior |
 | :--- | :--- | :--- | :--- |
-| `SITE REGISTER` | No (Pre-Auth) | `SITE REGISTER <user> <pubkey>` | Validates `<user>` (`[a-zA-Z0-9_-]`), blocks overwrite of existing users (`550`), parses ASCII-armored or Base64 OpenPGP public key, persists to `./authorized_keys/<user>.asc`, and returns `200`. |
+| `SITE REGISTER` | No (Pre-Auth) | `SITE REGISTER <user> <pubkey>` | Validates `<user>` (`[a-zA-Z0-9_-]`), blocks overwrite of existing users (`550`), parses ASCII-armored or Base64 OpenPGP public key, atomically persists via `create_new(true)` to `./authorized_keys/<user>.asc`, and returns `200`. |
 | `SITE PUBKEY` | No (Pre-Auth) | `SITE PUBKEY <user> <pubkey>` | Alias for `SITE REGISTER`. |
-| `USER` | No | `USER <username>` | Verifies user exists in memory or `./authorized_keys/`, generates a 128-bit CSPRNG nonce, and replies `331 Challenge: speakeasy-nonce-<hex32>. Sign with OpenPGP key and submit in PASS.` |
+| `SITE DATATOKEN` | **Yes** | `SITE DATATOKEN <token>` | Arms a single-use data-channel binding token (`SEC-08`) requiring the next passive data socket to present `TOKEN <token>\r\n` before streaming bytes (`200` or `425`). |
+| `USER` | No | `USER <username>` | Verifies user exists in memory or `./authorized_keys/`, generates a 128-bit CSPRNG nonce (`60s` TTL, `128`-entry cap), and replies `331 Challenge: speakeasy-nonce-<hex32>. Sign with OpenPGP key and submit in PASS.` |
 | `PASS` | No (Completes Auth) | `PASS <signed_payload>` | Atomically consumes the session nonce and verifies either an OpenPGP `CleartextSignedMessage` (raw or Base64-wrapped) or an RSA-1024 `PKCS#1 v1.5` signature. Replies `230` on match or `530` on failure. |
-| `FEAT` | No | `FEAT` | Lists supported protocol extensions: `UTF8`, `PASV`, `REST STREAM`, `SITE REGISTER`. |
+| `FEAT` | No | `FEAT` | Lists supported protocol extensions: `UTF8`, `PASV`, `REST STREAM`, `SITE REGISTER`, `SITE DATATOKEN`. |
 | `SYST` | No | `SYST` | Replies `215 UNIX Type: L8 (speakeasy Core)`. |
 | `PWD` | **Yes** | `PWD` | Returns the current normalized virtual directory relative to `./ftp_data` (`257`). |
-| `CWD` | **Yes** | `CWD <relative_dir>` | Changes working directory inside `./ftp_data` after passing `resolve_safe_path()` traversal validation (`250` or `550`). |
-| `PASV` | **Yes** | `PASV` | Binds an ephemeral loopback data listener (`127.0.0.1:0`) and returns `227 Entering Passive Mode (127,0,0,1,p1,p2)`. |
-| `LIST` | **Yes** | `LIST` | Streams UNIX-formatted directory entries over the passive data socket (`150` -> `226`). |
+| `CWD` | **Yes** | `CWD <relative_dir>` | Changes working directory inside `./ftp_data` after passing `resolve_safe_path()` fail-closed traversal validation (`250` or `550`). |
+| `PASV` | **Yes** | `PASV` | Binds a non-blocking ephemeral loopback data listener (`127.0.0.1:0`, `10s` accept deadline) and returns `227 Entering Passive Mode (127,0,0,1,p1,p2)`. |
+| `LIST` | **Yes** | `LIST` | Re-validates active directory confinement (`SEC-10`) and streams UNIX-formatted directory entries over the passive data socket (`150` -> `226`). |
 | `RETR` | **Yes** | `RETR <filename>` | Validates path confinement and streams file contents in 8,192-byte binary chunks over the passive data socket (`150` -> `226`). |
 | `STOR` | **Yes** | `STOR <filename>` | Validates path confinement and writes incoming passive data stream to `./ftp_data/<filename>` (`150` -> `226`). |
 | `DELE` | **Yes** | `DELE <filename>` | Validates path confinement and removes the specified file inside `./ftp_data` (`250`). |
-| `QUIT` | No | `QUIT` | Closes the control session cleanly (`221 Goodbye.`). |
+| `QUIT` | No | `QUIT` | Evicts any unconsumed session challenge (`SEC-06`) and closes the control session cleanly (`221 Goodbye.`). |
 
 ---
 
 ## 5. Headless CLI, Self-Test Harness & Companion Tooling
 
-Mahajani includes a built-in 10-gate TCP verification suite (`src/self_test.rs`) and three Python operational utilities (`tools/`):
+Mahajani includes a built-in 13-gate TCP verification suite (`src/self_test.rs`) and three Python operational utilities (`tools/`):
 
 ```powershell
-# Run all 10 runtime & adversarial security verification gates over live loopback TCP
+# Run all 13 runtime & adversarial security verification gates over live loopback TCP
 cargo run --release -- --test
 
 # Start the server on a custom bind address/port
@@ -118,9 +119,9 @@ python tools/surveillance_worker.py ./ftp_data ./authorized_keys -l .audit.log -
 
 | Document | Description |
 | :--- | :--- |
-| [**ARCHITECTURE.md**](ARCHITECTURE.md) | Deep technical specification: OpenPGP & RSA-1024 challenge-response protocol, `SITE REGISTER` enrollment rules, `resolve_safe_path` traversal IDS, 10-gate verification matrix, and threat model. |
+| [**ARCHITECTURE.md**](ARCHITECTURE.md) | Deep technical specification: OpenPGP & RSA-1024 challenge-response protocol, `SITE REGISTER` & `SITE DATATOKEN` hardening, `resolve_safe_path` traversal IDS, 13-gate verification matrix, and threat model. |
 | [**INSTALL.md**](INSTALL.md) | Step-by-step installation, Rust & Python prerequisites, directory layout setup, and troubleshooting. |
-| [**CONTRIBUTING.md**](CONTRIBUTING.md) | Developer workflow, security hardening backlog (`SEC-06` through `SEC-11`), and verification requirements. |
+| [**CONTRIBUTING.md**](CONTRIBUTING.md) | Developer workflow, security hardening invariants (`SEC-06` through `SEC-11`), and verification requirements. |
 | [**CHANGELOG.md**](CHANGELOG.md) | Release history and security hardening milestones. |
 | [**MISSION_DOSSIER.md**](MISSION_DOSSIER.md) | Evaluation dispatch specification (`tsiscoe/mahajani`). |
 | [**RED_DAWN_INDEPENDENT_AUDIT.md**](RED_DAWN_INDEPENDENT_AUDIT.md) | Independent adversarial security review and remediation blueprints (`SEC-06` – `SEC-11`). |

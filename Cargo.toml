@@ -1,6 +1,6 @@
 [package]
 name = "mahajani"
-version = "1.0.0"
+version = "1.1.0"
 edition = "2024"
 authors = ["Ty Siscoe"]
 description = "OpenPGP & RSA Public-Key Challenge-Response Authenticated FTP Server with In-Band Provisioning and Traversal IDS"

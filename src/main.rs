@@ -14,7 +14,7 @@ fn main() {
 
     if args.iter().any(|a| a == "--test" || a == "-t") {
         println!("================================================================================");
-        println!("SPEAKEASY: RUNTIME & SECURITY HARDENING VERIFICATION (10 GATES)");
+        println!("MAHAJANI: RUNTIME & SECURITY HARDENING VERIFICATION (13 GATES)");
         println!("================================================================================");
         self_test::run_self_test();
         return;
@@ -41,7 +41,7 @@ fn main() {
     let auth_arc = Arc::new(auth_manager);
     let server = FtpServer::new(&bind_addr, auth_arc, root_dir);
 
-    println!("[STARTUP] Starting speakeasy Server on {}", bind_addr);
+    println!("[STARTUP] Starting Mahajani Server on {}", bind_addr);
     if let Err(e) = server.run() {
         eprintln!("[FATAL] Server error: {}", e);
     }

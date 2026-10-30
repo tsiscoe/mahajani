@@ -6,6 +6,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ---
 
+## [1.1.0] - 2026-10-29
+
+### Security & Hardening (`red-dawn-remediated`)
+- **`SEC-06` (Unauthenticated Challenge Eviction & Capacity Bounds):** Added `AuthManager::clear_challenge()` invoked automatically via `impl Drop for FtpSession` and `QUIT`, plus a 60-second challenge TTL and 128-entry LRU eviction ceiling.
+- **`SEC-07` (Non-Blocking `PASV` Accept Deadlines):** Converted `accept_data_connection()` to non-blocking `TcpListener::accept()` polling with a 10-second `Instant` deadline and 30-second data stream read/write timeouts.
+- **`SEC-08` (Passive Data-Channel Peer & Token Binding):** Enforced control-peer IP matching on accepted passive sockets and added `SITE DATATOKEN <token>` requiring a `TOKEN <token>\r\n` preamble before streaming bytes.
+- **`SEC-09` (Atomic Key Enrollment):** Held a single `authorized_keys` mutex lock across existence check and insertion, persisting keys exclusively via `OpenOptions::new().write(true).create_new(true)` + `sync_all()`.
+- **`SEC-10` & `SEC-11` (Fail-Closed Canonical Confinement & Windows Hygiene):** Made `canonicalize()` strictly fail-closed, added component-by-component `symlink_metadata()` reparse rejection, re-validated active directories on `LIST`, and blocked reserved Windows device names (`CON`, `NUL`, `COM1`..`9`, `LPT1`..`9`), trailing dots/spaces, and `~` 8.3 shortname aliases.
+- **13-Gate Automated Verification Suite (`src/self_test.rs`):** Expanded `--test` from 10 to 13 live TCP gates verifying `SEC-06` through `SEC-11`.
+
+---
+
 ## [1.0.0] - 2026-10-29
 
 ### Added

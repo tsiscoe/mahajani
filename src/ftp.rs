@@ -1,11 +1,23 @@
 use std::fs::{self, File};
-use std::io::{BufRead, BufReader, Read, Write};
+use std::io::{BufRead, BufReader, ErrorKind, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use crate::auth::AuthManager;
+
+/// Passive data listener accept deadline (`SEC-07`)
+const PASV_ACCEPT_TIMEOUT: Duration = Duration::from_secs(10);
+/// Data socket read/write timeout (`SEC-07`)
+const DATA_SOCKET_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Reserved Windows DOS device names rejected in every path segment (`SEC-11`)
+const WINDOWS_RESERVED_NAMES: &[&str] = &[
+    "CON", "PRN", "AUX", "NUL", "CLOCK$",
+    "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9",
+    "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
+];
 
 pub struct FtpServer {
     bind_addr: String,
@@ -72,10 +84,25 @@ impl FtpServer {
     }
 }
 
-/// Canonical path resolution strictly preventing escaping the virtual root.
-/// Returns (normalized_relative_path, absolute_filesystem_path) on success.
-fn resolve_safe_path(root: &Path, rel: &Path, user_input: &str) -> Result<(PathBuf, PathBuf), ()> {
-    // 1. Immediately reject drive letters, absolute slashes, or null bytes
+/// Inspect path segment for Windows trailing dots/spaces, 8.3 tilde aliases, and reserved device names (`SEC-11`)
+fn is_safe_component_name(part: &str) -> bool {
+    if part.is_empty()
+        || part.ends_with('.')
+        || part.ends_with(' ')
+        || part.contains('~')
+        || part.chars().any(|c| c.is_control() || matches!(c, '<' | '>' | ':' | '"' | '|' | '?' | '*'))
+    {
+        return false;
+    }
+
+    let stem = part.split('.').next().unwrap_or(part).to_ascii_uppercase();
+    !WINDOWS_RESERVED_NAMES.contains(&stem.as_str())
+}
+
+/// Fail-closed canonical path resolution strictly preventing escaping the virtual root (`SEC-10` & `SEC-11`).
+/// Returns `(normalized_relative_path, absolute_filesystem_path)` on success.
+pub fn resolve_safe_path(root: &Path, rel: &Path, user_input: &str) -> Result<(PathBuf, PathBuf), ()> {
+    // 1. Immediately reject drive letters, absolute slashes, UNC prefixes, or null bytes
     if user_input.contains(':')
         || user_input.starts_with('/')
         || user_input.starts_with('\\')
@@ -84,7 +111,7 @@ fn resolve_safe_path(root: &Path, rel: &Path, user_input: &str) -> Result<(PathB
         return Err(());
     }
 
-    // 2. Normalization walk
+    // 2. Normalization walk with Windows component hygiene (`SEC-11`)
     let mut normalized = rel.to_path_buf();
     for part in user_input.split(['/', '\\']) {
         if part.is_empty() || part == "." {
@@ -94,28 +121,41 @@ fn resolve_safe_path(root: &Path, rel: &Path, user_input: &str) -> Result<(PathB
                 return Err(()); // Attempted to escape above virtual root
             }
         } else {
+            if !is_safe_component_name(part) {
+                return Err(());
+            }
             normalized.push(part);
         }
     }
 
-    let full_path = root.join(&normalized);
+    // 3. Fail-closed canonicalization & symlink/reparse inspection (`SEC-10`)
+    let root_canon = root.canonicalize().map_err(|_| ())?;
 
-    // 3. Verify canonical path stays within canonical root
-    if let Ok(root_canon) = root.canonicalize() {
-        if full_path.exists() {
-            if let Ok(full_canon) = full_path.canonicalize() {
-                if !full_canon.starts_with(&root_canon) {
-                    return Err(());
-                }
+    // Reject symlinks/reparse points along every prefix component inside root
+    let mut cursor = root.to_path_buf();
+    for comp in normalized.components() {
+        cursor.push(comp);
+        if let Ok(meta) = fs::symlink_metadata(&cursor) {
+            if meta.file_type().is_symlink() {
+                return Err(());
             }
-        } else if let Some(parent) = full_path.parent() {
-            if parent.exists() {
-                if let Ok(parent_canon) = parent.canonicalize() {
-                    if !parent_canon.starts_with(&root_canon) {
-                        return Err(());
-                    }
-                }
-            }
+        }
+    }
+
+    let full_path = root.join(&normalized);
+    if let Ok(meta) = fs::symlink_metadata(&full_path) {
+        if meta.file_type().is_symlink() {
+            return Err(());
+        }
+        let full_canon = full_path.canonicalize().map_err(|_| ())?;
+        if !full_canon.starts_with(&root_canon) {
+            return Err(());
+        }
+    } else {
+        let parent = full_path.parent().ok_or(())?;
+        let parent_canon = parent.canonicalize().map_err(|_| ())?;
+        if !parent_canon.starts_with(&root_canon) {
+            return Err(());
         }
     }
 
@@ -158,6 +198,14 @@ struct FtpSession {
     username: Option<String>,
     authenticated: bool,
     data_listener: Option<TcpListener>,
+    expected_data_token: Option<String>,
+}
+
+/// Automatically evict any unconsumed session challenge when `FtpSession` drops (`SEC-06`)
+impl Drop for FtpSession {
+    fn drop(&mut self) {
+        self.auth_manager.clear_challenge(&self.session_id);
+    }
 }
 
 impl FtpSession {
@@ -172,6 +220,7 @@ impl FtpSession {
             username: None,
             authenticated: false,
             data_listener: None,
+            expected_data_token: None,
         }
     }
 
@@ -213,6 +262,7 @@ impl FtpSession {
                 }
             }
         }
+        self.auth_manager.clear_challenge(&self.session_id);
         println!("[FTP][{}] Client disconnected", self.session_id);
     }
 
@@ -266,6 +316,7 @@ impl FtpSession {
                 }
             }
             "QUIT" => {
+                self.auth_manager.clear_challenge(&self.session_id);
                 self.send_resp(221, "Goodbye.");
                 return false;
             }
@@ -273,7 +324,7 @@ impl FtpSession {
                 self.send_resp(215, "UNIX Type: L8 (speakeasy Core)");
             }
             "FEAT" => {
-                let feat_resp = "211-Features:\r\n UTF8\r\n PASV\r\n REST STREAM\r\n SITE REGISTER\r\n211 End\r\n";
+                let feat_resp = "211-Features:\r\n UTF8\r\n PASV\r\n REST STREAM\r\n SITE REGISTER\r\n SITE DATATOKEN\r\n211 End\r\n";
                 let _ = self.stream.write_all(feat_resp.as_bytes());
                 let _ = self.stream.flush();
             }
@@ -307,8 +358,20 @@ impl FtpSession {
                             }
                         }
                     }
+                    "DATATOKEN" => {
+                        if !self.authenticated {
+                            self.send_resp(530, "Please login before binding a data-channel token.");
+                            return true;
+                        }
+                        if parts.len() < 2 || parts[1].trim().is_empty() {
+                            self.send_resp(501, "Syntax error: SITE DATATOKEN <hex_token>");
+                            return true;
+                        }
+                        self.expected_data_token = Some(parts[1].trim().to_string());
+                        self.send_resp(200, "Data-channel binding token armed for next PASV transfer.");
+                    }
                     "HELP" => {
-                        self.send_resp(214, "SITE commands: SITE REGISTER <username> <armored_pubkey_or_base64>");
+                        self.send_resp(214, "SITE commands: SITE REGISTER <username> <armored_pubkey_or_base64> | SITE DATATOKEN <token>");
                     }
                     _ => {
                         self.send_resp(504, "Unknown SITE command.");
@@ -347,8 +410,8 @@ impl FtpSession {
             "PASV" => {
                 let listener = match TcpListener::bind("127.0.0.1:0") {
                     Ok(l) => l,
-                    Err(e) => {
-                        self.send_resp(425, &format!("Can't open data connection: {}", e));
+                    Err(_) => {
+                        self.send_resp(425, "Can't open passive data listener.");
                         return true;
                     }
                 };
@@ -366,6 +429,15 @@ impl FtpSession {
                 self.send_resp(227, &format!("Entering Passive Mode (127,0,0,1,{},{}).", p1, p2));
             }
             "LIST" => {
+                // Re-validate current directory against root before listing (`SEC-10`)
+                let target_dir = match resolve_safe_path(&self.root_dir, &self.current_rel_dir, ".") {
+                    Ok((_, p)) => p,
+                    Err(()) => {
+                        self.send_resp(550, "Security violation: Active directory failed confinement check.");
+                        return true;
+                    }
+                };
+
                 let mut data_stream = match self.accept_data_connection() {
                     Some(s) => s,
                     None => return true,
@@ -373,7 +445,6 @@ impl FtpSession {
 
                 self.send_resp(150, "Here comes the directory listing.");
 
-                let target_dir = self.root_dir.join(&self.current_rel_dir);
                 let mut listing = String::new();
 
                 if let Ok(entries) = fs::read_dir(target_dir) {
@@ -439,9 +510,9 @@ impl FtpSession {
                         drop(data_stream);
                         self.send_resp(226, "Transfer complete.");
                     }
-                    Err(e) => {
+                    Err(_) => {
                         drop(data_stream);
-                        self.send_resp(550, &format!("Failed to open file: {}", e));
+                        self.send_resp(550, "Failed to open requested file.");
                     }
                 }
             }
@@ -483,9 +554,9 @@ impl FtpSession {
                         drop(data_stream);
                         self.send_resp(226, "Transfer complete.");
                     }
-                    Err(e) => {
+                    Err(_) => {
                         drop(data_stream);
-                        self.send_resp(550, &format!("Failed to create file: {}", e));
+                        self.send_resp(550, "Failed to create target file.");
                     }
                 }
             }
@@ -516,6 +587,7 @@ impl FtpSession {
         true
     }
 
+    /// Non-blocking passive data accept with deadline (`SEC-07`) and peer IP / optional token verification (`SEC-08`)
     fn accept_data_connection(&mut self) -> Option<TcpStream> {
         let listener = match self.data_listener.take() {
             Some(l) => l,
@@ -525,11 +597,58 @@ impl FtpSession {
             }
         };
 
-        match listener.accept() {
-            Ok((stream, _)) => Some(stream),
-            Err(e) => {
-                self.send_resp(425, &format!("Failed to accept data connection: {}", e));
-                None
+        let expected_token = self.expected_data_token.take();
+        let control_peer_ip = self.stream.peer_addr().ok().map(|a| a.ip());
+
+        if listener.set_nonblocking(true).is_err() {
+            self.send_resp(425, "Failed to configure passive data listener.");
+            return None;
+        }
+
+        let deadline = Instant::now() + PASV_ACCEPT_TIMEOUT;
+        loop {
+            match listener.accept() {
+                Ok((mut data_stream, data_peer)) => {
+                    // Verify data peer IP matches control peer IP (`SEC-08`)
+                    if let Some(ctrl_ip) = control_peer_ip {
+                        if data_peer.ip() != ctrl_ip {
+                            eprintln!(
+                                "[SECURITY BREACH][DATA_HIJACK] Session {} rejected PASV data peer {} (control peer {})",
+                                self.session_id,
+                                data_peer.ip(),
+                                ctrl_ip
+                            );
+                            continue;
+                        }
+                    }
+
+                    let _ = data_stream.set_nonblocking(false);
+                    let _ = data_stream.set_read_timeout(Some(DATA_SOCKET_TIMEOUT));
+                    let _ = data_stream.set_write_timeout(Some(DATA_SOCKET_TIMEOUT));
+
+                    // If client armed a per-transfer data token via `SITE DATATOKEN <token>`, verify preamble (`SEC-08`)
+                    if let Some(ref token) = expected_token {
+                        let expected_header = format!("TOKEN {}\r\n", token);
+                        let mut token_buf = vec![0u8; expected_header.len()];
+                        if data_stream.read_exact(&mut token_buf).is_err() || token_buf != expected_header.as_bytes() {
+                            eprintln!(
+                                "[SECURITY BREACH][DATA_HIJACK] Session {} rejected unauthenticated data socket preamble",
+                                self.session_id
+                            );
+                            self.send_resp(425, "Security violation: Data-channel token mismatch.");
+                            return None;
+                        }
+                    }
+
+                    return Some(data_stream);
+                }
+                Err(e) if e.kind() == ErrorKind::WouldBlock && Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                Err(_) => {
+                    self.send_resp(425, "Passive data connection timed out.");
+                    return None;
+                }
             }
         }
     }

@@ -1,15 +1,15 @@
 # Mahajani — AI Agent & LLM Context Index (llms.txt)
 
-> Mahajani is a pure-Rust (2024 Edition) OpenPGP (RFC 4880 / RFC 9580) and 1024-bit RSA challenge-response authenticated FTP server with in-band public-key registration (`SITE REGISTER`), active path-traversal Intrusion Detection (`resolve_safe_path`), bounded worker concurrency (`ConnectionGuard`), a 10-gate automated TCP self-test harness (`--test`), and companion Python utilities for keyserver federation (`pgp.mit.edu`), `.pgp` payload encryption, and out-of-band filesystem surveillance.
+> Mahajani is a pure-Rust (2024 Edition) OpenPGP (RFC 4880 / RFC 9580) and 1024-bit RSA challenge-response authenticated FTP server with in-band public-key registration (`SITE REGISTER`), per-transfer data-channel token binding (`SITE DATATOKEN`), fail-closed path-traversal Intrusion Detection (`resolve_safe_path`), bounded worker concurrency (`ConnectionGuard`), a 13-gate automated TCP self-test harness (`--test`), and companion Python utilities for keyserver federation (`pgp.mit.edu`), `.pgp` payload encryption, and out-of-band filesystem surveillance.
 
 ## Repository Map & Core Modules
 
-- `Cargo.toml`: Crate manifest (`mahajani v1.0.0`, Rust 2024 Edition, MIT License; dependencies: `pgp 0.21`, `rsa 0.9`, `sha2 0.10`, `base64 0.22`, `hex 0.4`, `rand 0.8`).
-- `src/main.rs`: CLI entrypoint supporting `--test` / `-t` (executes the 10-gate verification suite) and `--addr <ip:port>` (defaults to `127.0.0.1:2121`), initializing `./authorized_keys` and `./ftp_data` and bootstrapping a default 1024-bit RSA keypair for `alice` if absent.
-- `src/auth.rs`: `AuthorizedKey` enum (`OpenPgp(SignedPublicKey)` and `Rsa1024(VerifyingKey<Sha256>)`) and `AuthManager` managing on-disk key loading (`.asc`, `.pgp`, `.pub`), in-band `register_pubkey_content` (`[a-zA-Z0-9_-]` sanitization + overwrite block), `issue_challenge` (`speakeasy-nonce-<hex32>`), and atomic single-use `verify_signature` (OpenPGP `CleartextSignedMessage` or Base64/Hex `PKCS#1 v1.5` RSA-1024 signature).
-- `src/ftp.rs`: `FtpServer`, `ConnectionGuard` (64-connection `AtomicUsize` cap), `read_line_capped` (4,096-byte DoS cap), `resolve_safe_path` (3-stage lexical + component-stack + `canonicalize()` virtual root confinement), and `FtpSession` implementing `USER`, `PASS`, `SITE REGISTER`/`PUBKEY`/`HELP`, `SYST`, `FEAT`, `TYPE`, `NOOP`, `PWD`, `CWD`, `PASV`, `LIST`, `RETR`, `STOR`, `DELE`, and `QUIT`.
+- `Cargo.toml`: Crate manifest (`mahajani v1.1.0`, Rust 2024 Edition, MIT License; dependencies: `pgp 0.21`, `rsa 0.9`, `sha2 0.10`, `base64 0.22`, `hex 0.4`, `rand 0.8`).
+- `src/main.rs`: CLI entrypoint supporting `--test` / `-t` (executes the 13-gate verification suite) and `--addr <ip:port>` (defaults to `127.0.0.1:2121`), initializing `./authorized_keys` and `./ftp_data` and bootstrapping a default 1024-bit RSA keypair for `alice` if absent.
+- `src/auth.rs`: `AuthorizedKey` enum (`OpenPgp(SignedPublicKey)` and `Rsa1024(VerifyingKey<Sha256>)`) and `AuthManager` managing on-disk key loading (`.asc`, `.pgp`, `.pub`), atomic in-band `register_pubkey_content` (`[a-zA-Z0-9_-]` sanitization + `create_new(true)` overwrite block, `SEC-09`), bounded `issue_challenge` (`speakeasy-nonce-<hex32>`, 60s TTL, 128 cap, `SEC-06`), `clear_challenge`, and atomic single-use `verify_signature` (OpenPGP `CleartextSignedMessage` or Base64/Hex `PKCS#1 v1.5` RSA-1024 signature).
+- `src/ftp.rs`: `FtpServer`, `ConnectionGuard` (64-connection `AtomicUsize` cap), `read_line_capped` (4,096-byte DoS cap), `resolve_safe_path` (fail-closed 3-stage lexical + Windows device/alias hygiene + `symlink_metadata()` + `canonicalize()` virtual root confinement, `SEC-10`/`SEC-11`), and `FtpSession` (with `Drop` challenge eviction) implementing `USER`, `PASS`, `SITE REGISTER`/`PUBKEY`/`DATATOKEN`/`HELP`, `SYST`, `FEAT`, `TYPE`, `NOOP`, `PWD`, `CWD`, `PASV` (10s non-blocking deadline + peer-IP/token binding, `SEC-07`/`SEC-08`), `LIST`, `RETR`, `STOR`, `DELE`, and `QUIT`.
 - `src/keygen.rs`: `KeyPair1024` helper generating 1024-bit RSA keypairs (`SigningKey<Sha256>` / `VerifyingKey<Sha256>`) and Base64 challenge signatures (`sign_challenge`).
-- `src/self_test.rs`: `run_self_test()` end-to-end TCP test harness running 10 runtime and adversarial security verification gates on `127.0.0.1:22123`.
+- `src/self_test.rs`: `run_self_test()` end-to-end TCP test harness running 13 runtime and Red-Dawn adversarial security verification gates on `127.0.0.1:22123`.
 - `tools/encrypt_payload.py`: Python (`pgpy`) utility that generates an OpenPGP 1024-bit authority keypair and signs/encrypts files into `.pgp` containers (`target.pgp`).
 - `tools/fetch_keyserver.py`: Python utility that queries HKP keyservers (`https://pgp.mit.edu/pks/lookup`) and saves verified public keys into `./authorized_keys/<user>.asc`.
 - `tools/surveillance_worker.py`: Out-of-band filesystem and honeypot monitoring daemon logging `[BREACH_ALERT]` events to `.audit.log`.
@@ -17,7 +17,7 @@
 ## Documentation & Audit Files
 
 - [README.md](README.md): Overview, Hundi/Mahajani cryptographic rationale, Mermaid architecture diagram, quick start, FTP command matrix, and CLI guide.
-- [ARCHITECTURE.md](ARCHITECTURE.md): Deep technical specification of the challenge-response state machine, `AuthorizedKey` verification, `resolve_safe_path` confinement, 10-gate self-test table, and threat model.
+- [ARCHITECTURE.md](ARCHITECTURE.md): Deep technical specification of the challenge-response state machine, `AuthorizedKey` verification, `resolve_safe_path` confinement, 13-gate self-test table, and threat model.
 - [INSTALL.md](INSTALL.md): Prerequisites, build instructions, key provisioning workflows, companion scripts, and troubleshooting.
 - [CONTRIBUTING.md](CONTRIBUTING.md): Security guardrails, verification commands, and hardening backlog.
 - [CHANGELOG.md](CHANGELOG.md): Release history.

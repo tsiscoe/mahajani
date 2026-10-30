@@ -107,9 +107,9 @@ Every rejected path emits a structured stderr security event:
 
 ---
 
-## 5. Built-In 10-Gate Verification Harness (`src/self_test.rs`)
+## 5. Built-In 13-Gate Verification Harness (`src/self_test.rs`)
 
-Running `cargo run --release -- --test` spawns an isolated background server on `127.0.0.1:22123` (using `./target/test_ftp_data` and `./target/test_keys`) and executes 10 live TCP verification gates:
+Running `cargo run --release -- --test` spawns an isolated background server on `127.0.0.1:22123` (using `./target/test_ftp_data` and `./target/test_keys`) and executes 13 live TCP verification gates:
 
 | Gate | Category | Verification Assertion |
 | :--- | :--- | :--- |
@@ -120,20 +120,23 @@ Running `cargo run --release -- --test` spawns an isolated background server on 
 | **Gate 5** | Passive Data Transfer (`PASV`/`STOR`/`RETR`) | Executes `PWD` (`257`), enters `PASV` (`227`), uploads `test_artifact.txt` via `STOR` (`150` -> `226`), downloads via `RETR`, and asserts byte-for-byte equality. |
 | **Gate 6** | `CWD` Traversal Defense | Sends `CWD ..\..` and asserts `550 Security violation: Traversal attempt logged and rejected.` |
 | **Gate 7** | `STOR` / `DELE` Traversal Defense | Sends `STOR ../evil_payload.txt` and `DELE ../escaped_target.txt` and asserts `550` rejection on both. |
-| **Gate 8** | Account Takeover Protection | Sends `SITE REGISTER alice fake_armored_key_attempt` and asserts `550` overwrite rejection. |
+| **Gate 8** | Account Takeover Protection (`SEC-09`) | Sends `SITE REGISTER alice fake_armored_key_attempt` and asserts `550` overwrite rejection. |
 | **Gate 9** | Registration Path Sanitization | Sends `SITE REGISTER ../attacker fake_payload` and asserts `550` username character rejection. |
-| **Gate 10** | Clean Session Teardown | Sends `QUIT` and asserts `221 Goodbye.` |
+| **Gate 10** | Unauthenticated Challenge Eviction (`SEC-06`) | Connects, issues `USER alice`, drops the TCP socket without `PASS`, and asserts `active_challenge_count() == 0`. |
+| **Gate 11** | Data-Channel Token Binding (`SEC-08`) | Arms `SITE DATATOKEN`, opens `PASV`, sends a mismatched `TOKEN` preamble on the data socket, and asserts `425` rejection. |
+| **Gate 12** | Windows Reserved Names & Aliases (`SEC-10`/`SEC-11`) | Verifies `resolve_safe_path()` rejects `CON`, `NUL.txt`, `COM1.log`, `PROGRA~1`, `evil.txt.`, `evil.txt `, and `file:stream`. |
+| **Gate 13** | Clean Session Teardown | Sends `QUIT` and asserts `221 Goodbye.` |
 
 ---
 
-## 6. Threat Model & Known Audit Posture
+## 6. Threat Model & Audit Remediation Posture
 
 | Threat Vector | Mitigated? | Mechanism in Mahajani |
 | :--- | :--- | :--- |
 | **Wire Sniffing / Password Replay** | **Yes** | Zero passwords exist. `USER` issues a 128-bit random nonce (`speakeasy-nonce-<hex32>`) consumed atomically on the first `PASS` attempt. |
 | **Forged Signature / Impersonation** | **Yes** | Verified against registered OpenPGP (`SignedPublicKey`) or RSA-1024 (`VerifyingKey<Sha256>`) public keys before flipping `session.authenticated = true`. |
-| **Unauthenticated Command Execution** | **Yes** | Match guard `_ if !self.authenticated => 530` blocks `PWD`, `CWD`, `PASV`, `LIST`, `RETR`, `STOR`, and `DELE`. |
-| **Relative Dot-Segment & Drive-Letter Traversal** | **Yes** | `resolve_safe_path()` blocks `:`, leading `/` or `\`, `\0`, stack underflow on `..`, and verifies `canonicalize()` prefix confinement. |
-| **Existing User Key Overwrite via `SITE REGISTER`** | **Yes** | `register_pubkey_content()` rejects registration if `has_user()` is true and restricts usernames to `[a-zA-Z0-9_-]`. |
+| **Unauthenticated Command Execution** | **Yes** | Match guard `_ if !self.authenticated => 530` blocks `PWD`, `CWD`, `PASV`, `LIST`, `RETR`, `STOR`, `DELE`, and `SITE DATATOKEN`. |
+| **Relative Dot-Segment & Drive-Letter Traversal** | **Yes** | `resolve_safe_path()` blocks `:`, leading `/` or `\`, `\0`, stack underflow on `..`, and verifies fail-closed `canonicalize()` prefix confinement. |
+| **Existing User Key Overwrite via `SITE REGISTER`** | **Yes** | `register_pubkey_content()` holds a single registry mutex lock and persists keys via `OpenOptions::create_new(true)` (`SEC-09`). |
 | **Control Line Memory Exhaustion (OOM DoS)** | **Yes** | `read_line_capped()` enforces a hard 4,096-byte ceiling per control command. |
-| **Advanced Hardening Vectors (`SEC-06` – `SEC-11`)** | *Documented in Audit* | Tracked in [**RED_DAWN_INDEPENDENT_AUDIT.md**](RED_DAWN_INDEPENDENT_AUDIT.md): unauthenticated challenge map eviction on drop (`SEC-06`), non-blocking `PASV` accept deadlines (`SEC-07`), data-channel peer binding (`SEC-08`), atomic `create_new` enrollment (`SEC-09`), and handle-relative symlink/reparse confinement (`SEC-10`/`SEC-11`). |
+| **Red-Dawn Hardening Vectors (`SEC-06` – `SEC-11`)** | **Yes (Remediated in v1.1.0)** | Documented in [**RED_DAWN_INDEPENDENT_AUDIT.md**](RED_DAWN_INDEPENDENT_AUDIT.md): challenge map eviction on `Drop` + 60s TTL / 128-entry cap (`SEC-06`), 10s non-blocking `PASV` accept deadlines (`SEC-07`), peer-IP + `SITE DATATOKEN` binding (`SEC-08`), atomic `create_new(true)` key enrollment (`SEC-09`), and fail-closed symlink/Windows reserved device hygiene (`SEC-10`/`SEC-11`). |
