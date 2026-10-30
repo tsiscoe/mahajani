@@ -1,0 +1,38 @@
+# Build artifacts
+/target/
+**/*.rs.bk
+*.pdb
+
+# Secret keys and private materials
+*.key
+*.pem
+*.priv
+*secret*
+server_secret_key.asc
+private_keys/
+
+# Sensitive data and active target payloads
+ftp_data/
+*.jpg
+*.png
+*.pgp
+*.bin
+
+# Environment & local credentials
+.env
+.env.*
+*.local
+
+# Surveillance & audit logs
+*.log
+.audit*
+
+# OS artifacts
+.DS_Store
+Thumbs.db
+
+# Documentation & presentation HTML decks
+*.html
+docs/*.html
+.docs/
+
